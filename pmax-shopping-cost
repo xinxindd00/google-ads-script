@@ -1,0 +1,119 @@
+/**
+ * Pmax Shopping 花费拆解脚本 
+ */
+
+function main() {
+  var emailAddress = ""; //在此处输入你的邮箱
+  var daysAgo = 30; 
+
+  // --- 自动计算日期范围逻辑 ---
+  var endDateObj = new Date();
+  endDateObj.setDate(endDateObj.getDate() - 1); // 结束日期设为昨天，保证数据完整性
+  var startDateObj = new Date();
+  startDateObj.setDate(startDateObj.getDate() - daysAgo);
+
+  function formatDate(date) {
+    var year = date.getFullYear();
+    var month = ("0" + (date.getMonth() + 1)).slice(-2);
+    var day = ("0" + date.getDate()).slice(-2);
+    return year + "-" + month + "-" + day;
+  }
+
+  var startDateStr = formatDate(startDateObj);
+  var endDateStr = formatDate(endDateObj);
+  
+  // 使用 BETWEEN 语法替代 DURING
+  var dateCondition = " BETWEEN '" + startDateStr + "' AND '" + endDateStr + "'";
+  // -----------------------------
+
+  var pmaxTotals = {};
+
+  // 1. 获取 Pmax 系列的总花费
+  var campaignQuery =
+      "SELECT campaign.id, campaign.name, campaign.advertising_channel_type, metrics.cost_micros " +
+      "FROM campaign " +
+      "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' " +
+      "AND metrics.cost_micros > 0 " +
+      "AND segments.date " + dateCondition;
+
+  var campaignReport = AdsApp.search(campaignQuery);
+  while (campaignReport.hasNext()) {
+    var row = campaignReport.next();
+    var campId = row.campaign.id;
+    pmaxTotals[campId] = {
+      name: row.campaign.name,
+      totalCost: row.metrics.costMicros / 1000000, 
+      shoppingCost: 0
+    };
+  }
+
+  // 2. 获取 Pmax 系列在购物视图（Shopping Performance View）的花费
+  var shoppingQuery =
+      "SELECT campaign.id, campaign.advertising_channel_type, metrics.cost_micros " +
+      "FROM shopping_performance_view " +
+      "WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' " +
+      "AND metrics.cost_micros > 0 " +
+      "AND segments.date " + dateCondition;
+
+  var shoppingReport = AdsApp.search(shoppingQuery);
+  while (shoppingReport.hasNext()) {
+    var row = shoppingReport.next();
+    var campId = row.campaign.id;
+    if (pmaxTotals[campId]) {
+      pmaxTotals[campId].shoppingCost = row.metrics.costMicros / 1000000;
+    }
+  }
+
+  // 3. 整理结果并生成邮件 HTML 结构
+  var htmlBody = "<h2 style='font-family: Arial;'>PMax系列购物渠道花费 </h2>";
+  
+
+  htmlBody += "<table border='1' style='border-collapse: collapse; padding: 8px; font-family: Arial; text-align: left;'>";
+  
+
+  htmlBody += "<tr style='background-color: #f2f2f2;'><th>广告系列名称</th><th>总花费</th><th>🛒 Shopping 花费</th><th>Shopping 占比</th><th>其他渠道花费 (视频/展示/搜索)</th></tr>";
+
+  var hasData = false;
+  for (var id in pmaxTotals) {
+    hasData = true;
+    var data = pmaxTotals[id];
+    var total = data.totalCost;
+    var shopping = data.shoppingCost;
+    var others = total - shopping;
+    others = others < 0 ? 0 : others; 
+    
+    var percentageNum = total > 0 ? (shopping / total) * 100 : 0;
+    var shoppingPercentage = percentageNum.toFixed(2) + "%";
+
+    var rowStyle = "";
+    if (percentageNum < 50) {
+      rowStyle = "background-color: #ffebee;"; // 淡红色
+    } else if (percentageNum < 80) {
+      rowStyle = "background-color: #fff9c4;"; // 淡黄色
+    }
+
+    htmlBody += "<tr style='" + rowStyle + "'>";
+    htmlBody += "<td style='padding: 8px;'>" + data.name + "</td>";
+    htmlBody += "<td style='padding: 8px;'>$" + total.toFixed(2) + "</td>";
+    htmlBody += "<td style='padding: 8px; font-weight: bold; color: #0f9d58;'>$" + shopping.toFixed(2) + "</td>";
+    htmlBody += "<td style='padding: 8px;'>" + shoppingPercentage + "</td>";
+    htmlBody += "<td style='padding: 8px; color: #db4437;'>$" + others.toFixed(2) + "</td>";
+    htmlBody += "</tr>";
+  }
+  htmlBody += "</table>";
+
+  // 4. 发送邮件
+  if (hasData) {
+    MailApp.sendEmail({
+      to: emailAddress,
+      subject: "Google Ads 报告: PMax Shopping 花费拆解",
+      htmlBody: htmlBody
+    });
+    Logger.log("✅ 报告已成功生成并发送至：" + emailAddress);
+  } else {
+    Logger.log("⚠️ 在指定的日期范围内，没有找到产生花费的 Pmax 系列。");
+  }
+  
+  // ==========================================
+  // ------------------------------------------
+}
