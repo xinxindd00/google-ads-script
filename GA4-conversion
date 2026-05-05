@@ -1,0 +1,138 @@
+/**
+ * 🔍 Google Ads vs GA4 搜索词转化差异排查脚本
+ * 功能：专门揪出 "GA4 有转化，但 Google Ads 原生代码无转化" 的搜索词
+ */
+
+function main() {
+  // ==========================================
+  // ⚙️ 基础配置区
+  // ==========================================
+  
+  // 1. Google Sheet 表格链接 
+  var SPREADSHEET_URL = "";
+  
+  // 2. 接收通知的邮箱地址 
+  var EMAIL_ADDRESS = "";
+  
+  // 3. 转化操作的精确名称 (⚠️ 必须与后台【转化】列表中的名称完全一致，区分大小写)
+  var ADS_CONV_NAME = "Purchase";
+  var GA4_CONV_NAME = "";
+  
+  // 4. 查询过去多少天的数据
+  var LOOKBACK_DAYS = 30; 
+
+  // ==========================================
+  // 🚀 核心代码区
+  // ==========================================
+
+  var timezone = AdsApp.currentAccount().getTimeZone();
+  var endDate = new Date();
+  var startDate = new Date();
+  startDate.setDate(endDate.getDate() - LOOKBACK_DAYS);
+  
+  var startDateStr = Utilities.formatDate(startDate, timezone, "yyyy-MM-dd");
+  var endDateStr = Utilities.formatDate(endDate, timezone, "yyyy-MM-dd");
+  
+  // 构建 GAQL 查询：按转化操作名称细分
+  var query = 
+    "SELECT " +
+    "campaign.name, " +
+    "ad_group.name, " +
+    "search_term_view.search_term, " +
+    "segments.conversion_action_name, " +
+    "metrics.all_conversions " + // 使用所有转化，防止 GA4 被设为次要转化抓不到
+    "FROM search_term_view " +
+    "WHERE segments.date BETWEEN '" + startDateStr + "' AND '" + endDateStr + "' " +
+    "AND metrics.all_conversions > 0";
+
+  var report = AdsApp.search(query);
+  
+  // 使用对象 (Map) 来在内存中聚合数据
+  var termMap = {};
+
+  while (report.hasNext()) {
+    var row = report.next();
+    
+    // 生成唯一键值，防止不同广告组有同名搜索词导致数据混淆
+    var uniqueKey = row.campaign.name + "|||" + row.adGroup.name + "|||" + row.searchTermView.searchTerm;
+    
+    if (!termMap[uniqueKey]) {
+      termMap[uniqueKey] = {
+        campaign: row.campaign.name,
+        adGroup: row.adGroup.name,
+        searchTerm: row.searchTermView.searchTerm,
+        adsConv: 0,
+        ga4Conv: 0
+      };
+    }
+    
+    var actionName = row.segments.conversionActionName;
+    var convValue = row.metrics.allConversions;
+    
+    // 分别累加两种转化的数值
+    if (actionName === ADS_CONV_NAME) {
+      termMap[uniqueKey].adsConv += convValue;
+    } else if (actionName === GA4_CONV_NAME) {
+      termMap[uniqueKey].ga4Conv += convValue;
+    }
+  }
+
+  // 筛选出符合条件的数据：Ads 为 0 且 GA4 > 0
+  var filteredRows = [];
+  for (var key in termMap) {
+    var item = termMap[key];
+    if (item.adsConv === 0 && item.ga4Conv > 0) {
+      filteredRows.push(item);
+    }
+  }
+
+  // --- 写入 Google Sheet ---
+  var spreadsheet;
+  try {
+    spreadsheet = SpreadsheetApp.openByUrl(SPREADSHEET_URL);
+  } catch (e) {
+    Logger.log("❌ 无法打开表格，请检查网址。");
+    return;
+  }
+  
+  var sheetName = "GA4差异词排查";
+  var sheet = spreadsheet.getSheetByName(sheetName);
+  if (sheet) {
+    sheet.clear();
+  } else {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  // 写入表头
+  var headers = [["广告系列", "广告组", "搜索词", "Ads 原生转化数 (" + ADS_CONV_NAME + ")", "GA4 转化数 (" + GA4_CONV_NAME + ")"]];
+  sheet.getRange(1, 1, 1, 5).setValues(headers).setFontWeight("bold");
+  sheet.getRange(1, 1, 1, 5).setBackground("#f3f3f3");
+
+  // 写入数据
+  if (filteredRows.length > 0) {
+    var body = filteredRows.map(function(item) {
+      return [item.campaign, item.adGroup, item.searchTerm, item.adsConv, item.ga4Conv];
+    });
+    
+    // 按照 GA4 转化数降序排序，把差异最大的顶在前面
+    body.sort(function(a, b) { return b[4] - a[4]; });
+    
+    sheet.getRange(2, 1, body.length, 5).setValues(body);
+    Logger.log("✅ 成功发现 " + body.length + " 个差异搜索词。");
+  } else {
+    sheet.getRange(2, 1).setValue("🎉 过去 " + LOOKBACK_DAYS + " 天内未发现数据差异。");
+    Logger.log("ℹ️ 未发现符合异常条件的搜索词。");
+  }
+
+  // --- 发送邮件通知 ---
+  var subject = "GA4有订单转化，但Google Ads无转化的搜索词报告";
+  var bodyText = "你好，\n\n" +
+                 "过去 " + LOOKBACK_DAYS + " 天的【GA4有转化，但Ads无转化】搜索词排查已完成。\n" +
+                 "本次共排查出 " + filteredRows.length + " 个异常搜索词记录。\n\n" +
+                 "查看详细数据请点击：\n" + SPREADSHEET_URL + "\n\n" +
+                 "⚠️ 数据诊断建议：\n" +
+                 "如果这些词大量存在，说明 Google Ads 原生代码（可能因 iOS 限制或跨域问题）漏记了大量转化，而 GA4 的数据模型捕获到了它们。\n\n" +
+                 "🌱 优化操作建议：第一，把GA4带来转化的关键字优化到搜索广告定位关键字、落地页、Feed； 第二，如果Google Ads无转化，但GA4有转化，不要停止投放";
+                  "祝工作顺利！";
+  MailApp.sendEmail(EMAIL_ADDRESS, subject, bodyText);
+}
