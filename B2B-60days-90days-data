@@ -1,0 +1,150 @@
+/**
+ * Google Ads 核心转化指标统计与邮件自动发送脚本
+ * 统计周期：过去7天、过去30天、过去60天、过去90天
+ */
+
+// ==================== [用户配置区] ====================
+const RECIPIENT_EMAILS = ""; // 替换为你的邮箱地址，多个邮箱用英文逗号分隔
+const EMAIL_SUBJECT_SUFFIX = "过去1/2/3个月核心转化指标汇总";
+// ======================================================
+
+function main() {
+  const timeFrames = [
+    { name: "过去1周 (7天)", days: 7 },
+    { name: "过去1个月 (30天)", days: 30 },
+    { name: "过去2个月 (60天)", days: 60 },
+    { name: "过去3个月 (90天)", days: 90 }
+  ];
+
+  const results = [];
+
+  Logger.log("==========================================================================");
+  Logger.log("                     Google Ads 账户转化指标汇总报告                        ");
+  Logger.log("==========================================================================");
+
+  timeFrames.forEach(tf => {
+    const dates = getDateRange(tf.days);
+    const query = `
+      SELECT 
+        metrics.cost_micros, 
+        metrics.conversions 
+      FROM customer 
+      WHERE segments.date BETWEEN '${dates.startDate}' AND '${dates.endDate}'
+    `;
+
+    const searchResults = AdsApp.search(query);
+    let totalCostMicros = 0;
+    let totalConversions = 0;
+
+    while (searchResults.hasNext()) {
+      const row = searchResults.next();
+      totalCostMicros += parseFloat(row.metrics.costMicros || 0);
+      totalConversions += parseFloat(row.metrics.conversions || 0);
+    }
+
+    const totalCost = totalCostMicros / 1000000;
+    const cpa = totalConversions > 0 ? (totalCost / totalConversions) : 0;
+
+    const formattedData = {
+      period: tf.name,
+      dateRange: `${dates.startDate} ~ ${dates.endDate}`,
+      cost: totalCost.toFixed(2),
+      conversions: totalConversions.toFixed(1),
+      cpa: cpa.toFixed(2)
+    };
+
+    results.push(formattedData);
+
+    Logger.log(`${formattedData.period}\t| 花费: $${formattedData.cost}\t| 询盘数: ${formattedData.conversions}\t| CPA: $${formattedData.cpa}`);
+  });
+
+  Logger.log("==========================================================================");
+
+  // 发送邮件
+  sendEmail(results);
+}
+
+/**
+ * 辅助函数：根据天数获取对应的 YYYY-MM-DD 日期范围（不包含今天）
+ */
+function getDateRange(daysBack) {
+  const today = new Date();
+  
+  const endDateObj = new Date(today);
+  endDateObj.setDate(today.getDate() - 1);
+  
+  const startDateObj = new Date(today);
+  startDateObj.setDate(today.getDate() - daysBack);
+
+  return {
+    startDate: formatDate(startDateObj),
+    endDate: formatDate(endDateObj)
+  };
+}
+
+/**
+ * 格式化日期为 YYYY-MM-DD 字符串
+ */
+function formatDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * 核心发送邮件函数（带表格HTML样式）
+ */
+function sendEmail(results) {
+  // 获取当前 Google Ads 账户的名称，如果未设置则读取 Customer ID
+  const accountName = AdsApp.currentAccount().getName() || AdsApp.currentAccount().getCustomerId();
+  
+  let tableRows = "";
+  results.forEach(row => {
+    tableRows += `
+      <tr style="border-bottom: 1px solid #ddd; text-align: center;">
+        <td style="padding: 10px; font-weight: bold; text-align: left;">${row.period}</td>
+        <td style="padding: 10px; color: #666; font-size: 12px;">${row.dateRange}</td>
+        <td style="padding: 10px;">${row.cost} 美元</td>
+        <td style="padding: 10px; color: #1a73e8; font-weight: bold;">${row.conversions}</td>
+        <td style="padding: 10px; color: #d93025; font-weight: bold;">${row.cpa} 美元</td>
+      </tr>
+    `;
+  });
+
+  const htmlBody = `
+    <div style="font-family: Arial, sans-serif; max-width: 650px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px;">
+      <h2 style="color: #1a73e8; margin-top: 0;">📊 Google Ads 转化指标汇总</h2>
+      <p style="color: #555;">账户名称/ID：<strong>${accountName}</strong></p>
+      
+      <table style="width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px;">
+        <thead>
+          <tr style="background-color: #f8f9fa; border-bottom: 2px solid #dee2e6;">
+            <th style="padding: 10px; text-align: left;">统计周期</th>
+            <th style="padding: 10px;">具体日期范围</th>
+            <th style="padding: 10px;">总花费</th>
+            <th style="padding: 10px;">询盘数 (转化)</th>
+            <th style="padding: 10px;">单个询盘成本 (CPA)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+      
+      <p style="font-size: 12px; color: #888; margin-top: 25px; border-top: 1px solid #eee; padding-top: 10px;">
+        * 本邮件由 Google Ads 脚本自动发送。数据计算区间不包含今天，以确保归因数据完整。
+      </p>
+    </div>
+  `;
+
+  const finalSubject = `【${accountName}】 ${EMAIL_SUBJECT_SUFFIX}`;
+
+  MailApp.sendEmail({
+    to: RECIPIENT_EMAILS,
+    subject: finalSubject,
+    htmlBody: htmlBody
+  });
+
+  Logger.log(`✅ 邮件已成功发送至: ${RECIPIENT_EMAILS}`);
+}
