@@ -10,7 +10,7 @@
 var CONFIG = {
   EMAIL_TO: "",           // 收件邮箱，多个用逗号分隔
   CONVERSION_NAMES_FILTER: [],          // 留空监控全部，或如 ["Submit lead form"]
-  ACCOUNT_LABEL: "",        // 账户名称
+  ACCOUNT_LABEL: "",   // 广告账户名称
   LOOKBACK_DAYS: 3,                     // 查最近几天（覆盖延迟入库）
   SENT_RECORD_KEY: "sent_conversions",  // 去重存储 Key，勿修改
 };
@@ -74,4 +74,141 @@ function getDateRange(now, tz, lookbackDays) {
   return {
     start: getDateStr(startDate, tz),
     end: getDateStr(now, tz),
+  };
+}
+
+// ============================================================
+// 📊 查询转化数据（GAQL + 明确日期范围）
+// ============================================================
+function getConversions(dateRange) {
+  var conversions = [];
+
+  // ---- 1. 关键词转化 ----
+  try {
+    var kwQuery =
+      "SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, " +
+      "metrics.conversions, segments.conversion_action_name, segments.date " +
+      "FROM keyword_view " +
+      "WHERE metrics.conversions > 0 " +
+      "AND segments.date >= '" + dateRange.start + "' " +
+      "AND segments.date <= '" + dateRange.end + "'";
+
+    Logger.log("关键词查询语句：" + kwQuery);
+
+    var kwReport = AdsApp.search(kwQuery);
+    while (kwReport.hasNext()) {
+      var row = kwReport.next();
+      var convName = row.segments.conversionActionName;
+
+      if (CONFIG.CONVERSION_NAMES_FILTER.length > 0 &&
+          CONFIG.CONVERSION_NAMES_FILTER.indexOf(convName) === -1) {
+        continue;
+      }
+
+      conversions.push({
+        date: row.segments.date,
+        campaign: row.campaign.name,
+        adGroup: row.adGroup.name,
+        keyword: row.adGroupCriterion.keyword.text,
+        conversionName: convName,
+        conversions: row.metrics.conversions,
+        searchTerm: "—",
+      });
+    }
+    Logger.log("关键词转化条数：" + conversions.length);
+  } catch(e) {
+    Logger.log("❌ 关键词查询出错：" + e.message);
+  }
+
+  // ---- 2. 搜索词（补充实际查询词）----
+  var searchTermMap = {};
+  try {
+    var sqQuery =
+      "SELECT campaign.name, ad_group.name, search_term_view.search_term, " +
+      "metrics.conversions, segments.date " +
+      "FROM search_term_view " +
+      "WHERE metrics.conversions > 0 " +
+      "AND segments.date >= '" + dateRange.start + "' " +
+      "AND segments.date <= '" + dateRange.end + "'";
+
+    var sqReport = AdsApp.search(sqQuery);
+    while (sqReport.hasNext()) {
+      var sr = sqReport.next();
+      var mapKey = sr.segments.date + "||" + sr.campaign.name + "||" + sr.adGroup.name;
+      if (!searchTermMap[mapKey]) searchTermMap[mapKey] = [];
+      searchTermMap[mapKey].push(sr.searchTermView.searchTerm);
+    }
+  } catch(e) {
+    Logger.log("❌ 搜索词查询出错：" + e.message);
+  }
+
+  // 注入搜索词
+  for (var i = 0; i < conversions.length; i++) {
+    var key = conversions[i].date + "||" + conversions[i].campaign + "||" + conversions[i].adGroup;
+    if (searchTermMap[key]) {
+      conversions[i].searchTerm = searchTermMap[key].join(", ");
+    }
+  }
+
+  return conversions;
+}
+
+// ============================================================
+// 📧 发送邮件
+// ============================================================
+function sendEmail(conversions, customerId, now, tz) {
+  var total = 0;
+  for (var i = 0; i < conversions.length; i++) {
+    total += Number(conversions[i].conversions);
+  }
+
+  var subject = "🎉 广告账户 [" + CONFIG.ACCOUNT_LABEL + "] 产生 " + total + " 个新询盘！";
+
+  var html = '<div style="font-family:Arial,sans-serif;max-width:780px;margin:0 auto;">';
+  html += '<h2 style="color:#1a73e8;">好消息！您的账户刚刚记录到了 ' + total + ' 个【新】转化。</h2>';
+  html += '<p style="color:#555;">这些转化可能是刚刚发生的，也可能是系统延迟统计后新出现的。以下是详细分布：</p>';
+
+  html += '<table border="1" cellpadding="10" cellspacing="0" style="border-collapse:collapse;width:100%;border-color:#ddd;">';
+  html += '<thead style="background:#f1f3f4;"><tr>';
+  html += '<th style="text-align:left;">发生时间<br>(账户时区)</th>';
+  html += '<th style="text-align:left;">广告系列</th>';
+  html += '<th style="text-align:left;">定位关键字</th>';
+  html += '<th style="text-align:left;">搜索查询词</th>';
+  html += '<th style="text-align:center;color:#1a73e8;">新增转化数</th>';
+  html += '<th style="text-align:center;">该时段总转化</th>';
+  html += '</tr></thead><tbody>';
+
+  var runningTotal = 0;
+  for (var j = 0; j < conversions.length; j++) {
+    var c = conversions[j];
+    runningTotal += Number(c.conversions);
+    html += '<tr>';
+    html += '<td>' + c.date + '</td>';
+    html += '<td>' + esc(c.campaign) + '<br><span style="color:#888;font-size:12px;">' + esc(c.conversionName) + '</span></td>';
+    html += '<td style="color:#1558d6;">' + esc(c.keyword) + '</td>';
+    html += '<td style="color:#137333;font-style:italic;">' + esc(c.searchTerm) + '</td>';
+    html += '<td style="text-align:center;color:#1e8e3e;font-weight:bold;font-size:16px;">+' + Number(c.conversions).toFixed(2) + '</td>';
+    html += '<td style="text-align:center;">' + runningTotal.toFixed(2) + '</td>';
+    html += '</tr>';
+  }
+
+  html += '</tbody></table><br>';
+  html += '<p style="color:#888;font-size:13px;">📌 账户ID：' + customerId +
+          ' | 检查时间：' + Utilities.formatDate(now, tz, "yyyy-MM-dd HH:mm") + '</p>';
+  html += '<p style="color:#888;font-size:13px;">提示：此脚本具有记忆功能，已经为您排除了之前通知过的历史转化。请放心将脚本设为【每小时运行】。</p>';
+  html += '</div>';
+
+  var recipients = CONFIG.EMAIL_TO.split(",").map(function(e) { return e.trim(); });
+  for (var k = 0; k < recipients.length; k++) {
+    MailApp.sendEmail({ to: recipients[k], subject: subject, htmlBody: html });
+    Logger.log("✅ 邮件已发送至：" + recipients[k]);
+  }
+}
+
+// ============================================================
+// 🛠 工具函数
+// ============================================================
+function esc(str) {
+  if (!str) return "—";
+  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
