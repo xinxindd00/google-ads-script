@@ -1,0 +1,77 @@
+/**
+ * Google Ads 转化监控脚本 - GAQL 正式版 v3
+ * 修正：用明确日期范围替代不支持的 LAST_N_DAYS 写法
+ * 建议运行频率：每小时
+ */
+
+// ============================================================
+// ⚙️ 配置区
+// ============================================================
+var CONFIG = {
+  EMAIL_TO: "",           // 收件邮箱，多个用逗号分隔
+  CONVERSION_NAMES_FILTER: [],          // 留空监控全部，或如 ["Submit lead form"]
+  ACCOUNT_LABEL: "",        // 账户名称
+  LOOKBACK_DAYS: 3,                     // 查最近几天（覆盖延迟入库）
+  SENT_RECORD_KEY: "sent_conversions",  // 去重存储 Key，勿修改
+};
+
+// ============================================================
+// 🚀 主函数
+// ============================================================
+function main() {
+  var tz = AdsApp.currentAccount().getTimeZone();
+  var customerId = AdsApp.currentAccount().getCustomerId();
+  var now = new Date();
+
+  Logger.log("运行时间：" + Utilities.formatDate(now, tz, "yyyy-MM-dd HH:mm:ss"));
+
+  var dateRange = getDateRange(now, tz, CONFIG.LOOKBACK_DAYS);
+  Logger.log("查询日期范围：" + dateRange.start + " ~ " + dateRange.end);
+
+  var props = PropertiesService.getScriptProperties();
+  var sentRaw = props.getProperty(CONFIG.SENT_RECORD_KEY);
+  var sentSet = sentRaw ? JSON.parse(sentRaw) : {};
+
+  // 清理7天前的旧去重记录
+  var cutoffDate = getDateStr(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), tz);
+  for (var k in sentSet) {
+    if (k.split("|")[0] < cutoffDate) delete sentSet[k];
+  }
+
+  var allConversions = getConversions(dateRange);
+  Logger.log("查询到原始转化记录数：" + allConversions.length);
+
+  var newConversions = [];
+  for (var i = 0; i < allConversions.length; i++) {
+    var conv = allConversions[i];
+    var dedupeKey = conv.date + "|" + conv.campaign + "|" + conv.keyword + "|" + conv.conversionName;
+    if (!sentSet[dedupeKey]) {
+      newConversions.push(conv);
+      sentSet[dedupeKey] = true;
+    }
+  }
+
+  Logger.log("新转化数（去重后）：" + newConversions.length);
+
+  if (newConversions.length > 0) {
+    sendEmail(newConversions, customerId, now, tz);
+    props.setProperty(CONFIG.SENT_RECORD_KEY, JSON.stringify(sentSet));
+    Logger.log("邮件发送完毕，已更新去重记录。");
+  } else {
+    Logger.log("无新转化，不发送邮件。");
+  }
+}
+
+// ============================================================
+// 📅 日期工具
+// ============================================================
+function getDateStr(date, tz) {
+  return Utilities.formatDate(date, tz, "yyyy-MM-dd");
+}
+
+function getDateRange(now, tz, lookbackDays) {
+  var startDate = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+  return {
+    start: getDateStr(startDate, tz),
+    end: getDateStr(now, tz),
+}
