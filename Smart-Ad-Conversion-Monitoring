@@ -1,0 +1,128 @@
+function main() {
+  var EMAIL_ADDRESS = ""; // 填写你的邮箱地址
+
+  // 1. 获取账号时区并计算日期范围
+  var today = new Date();
+  var timeZone = AdsApp.currentAccount().getTimeZone();
+
+  function getFormattedDate(daysAgo) {
+    var d = new Date(today.getTime() - daysAgo * 24 * 60 * 60 * 1000);
+    return Utilities.formatDate(d, timeZone, "yyyy-MM-dd");
+  }
+
+  var d30Start = getFormattedDate(30);
+  var d30End = getFormattedDate(1);
+  var d7Start = getFormattedDate(7);
+  var d7End = getFormattedDate(1);
+  var p7Start = getFormattedDate(14);
+  var p7End = getFormattedDate(8);
+
+  var campaignData = {};
+
+  // 2. 辅助函数：批量查询某段时间内有转化的广告系列并合并
+  // 核心 Debug 修复：不再限制具体的 AdvertisingChannelType，只要在对应时间段内有转化 (conversions > 0)，就全部抓取并合并到字典中，避免漏掉任何数据。
+  function fetchMetrics(startDate, endDate, periodKey) {
+    var query = "SELECT campaign.id, campaign.name, metrics.conversions " +
+                "FROM campaign " +
+                "WHERE segments.date BETWEEN '" + startDate + "' AND '" + endDate + "' " +
+                "AND metrics.conversions > 0";
+    
+    var iterator = AdsApp.search(query);
+    while (iterator.hasNext()) {
+      var row = iterator.next();
+      var id = row.campaign.id;
+      
+      // 如果是第一次遇到这个广告系列，初始化它的数据结构
+      if (!campaignData[id]) {
+        campaignData[id] = {
+          name: row.campaign.name,
+          conv30: 0,
+          conv7: 0,
+          prev7: 0
+        };
+      }
+      campaignData[id][periodKey] += parseFloat(row.metrics.conversions || 0);
+    }
+  }
+
+  // 分三次拉取不同时间段的数据，填入 campaignData 字典
+  fetchMetrics(d30Start, d30End, "conv30");
+  fetchMetrics(d7Start, d7End, "conv7");
+  fetchMetrics(p7Start, p7End, "prev7");
+
+  // 3. 整理为数组并计算环比
+  var reportRows = [];
+  for (var id in campaignData) {
+    var data = campaignData[id];
+
+    var wowChange = "0.00%";
+    if (data.prev7 > 0) {
+      var changePercent = ((data.conv7 - data.prev7) / data.prev7) * 100;
+      wowChange = (changePercent >= 0 ? "+" : "") + changePercent.toFixed(2) + "%";
+    } else if (data.conv7 > 0) {
+      wowChange = "+100.00% (上期为0)";
+    }
+
+    reportRows.push({
+      name: data.name,
+      conv30: data.conv30,
+      conv7: data.conv7,
+      prev7: data.prev7,
+      change: wowChange
+    });
+  }
+
+  // ==========================================
+  // 条件 1: 按照近30天总转化数降序排序
+  // ==========================================
+  reportRows.sort(function(a, b) {
+    return b.conv30 - a.conv30; 
+  });
+
+  if (reportRows.length === 0) {
+    Logger.log("所选日期范围内，账号下未发现任何有转化的广告系列。");
+    MailApp.sendEmail(EMAIL_ADDRESS, "【Google Ads】转化报告为空", "过去30天内没有抓取到有转化的广告系列。");
+    return;
+  }
+
+  // 4. 构建 HTML 表格
+  var htmlBody = '<h2 style="font-family: Arial, sans-serif;">智能广告系列转化报告</h2>' +
+    '<table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse; font-family: Arial, sans-serif;">' +
+    '<tr style="background-color: #f2f2f2; text-align: left;">' +
+      '<th>广告系列名称</th>' +
+      '<th style="text-align: right;">近一月转化 (30天)</th>' +
+      '<th style="text-align: right;">近一周转化 (7天)</th>' +
+      '<th style="text-align: right;">周环比变化</th>' +
+    '</tr>';
+
+  for (var i = 0; i < reportRows.length; i++) {
+    var row = reportRows[i];
+    
+    // ==========================================
+    // 条件 2: 用红色背景突出近一周转化数下降的系列
+    // ==========================================
+    var rowStyle = "";
+    if (row.conv7 < row.prev7) {
+      rowStyle = "background-color: #ffe6e6;"; // 浅红色高亮
+    }
+
+    htmlBody += '<tr style="' + rowStyle + '">' +
+      '<td>' + row.name + '</td>' +
+      '<td style="text-align: right;">' + row.conv30.toFixed(2) + '</td>' +
+      '<td style="text-align: right;">' + row.conv7.toFixed(2) + '</td>' +
+      '<td style="text-align: right;">' + row.change + '</td>' +
+    '</tr>';
+  }
+
+  htmlBody += '</table>';
+  htmlBody += '<p style="font-size: 12px; color: #666; font-family: Arial;">* 红色背景代表近7天转化数较上一个7天出现下滑。</p>';
+
+  // 5. 发送邮件
+  MailApp.sendEmail({
+    to: EMAIL_ADDRESS,
+    subject: "【Google Ads】近期转化报告 (" + d7Start + " ~ " + d7End + ")",
+    htmlBody: htmlBody
+  });
+
+  Logger.log("报告生成完毕，已发送至：" + EMAIL_ADDRESS);
+}
